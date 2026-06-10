@@ -1,0 +1,44 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: gemma
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: gemma-26b
+    app.kubernetes.io/component: model-server
+    app.kubernetes.io/part-of: langgraph-production-agent
+spec:
+  predictor:
+    minReplicas: 1
+    maxReplicas: 1
+    timeout: 600
+    model:
+      runtime: gemma4-vllm
+      modelFormat:
+        name: huggingface
+      storageUri: pvc://gemma-26b-model-cache/gemma-4-26b-a4b-nvfp4
+      args:
+        - --served-model-name=gemma
+        - --max-model-len=8192
+        - --max-num-batched-tokens=8192
+        - --max-num-seqs=16
+        - --gpu-memory-utilization=0.88
+        - --kv-cache-dtype=fp8
+        - --trust-remote-code
+        # --enforce-eager is disabled to allow vLLM CUDA graph optimization.
+        # Re-enable it if Gemma 4 startup or generation becomes unstable.
+        # - --enforce-eager
+      env:
+        - name: KSERVE_OPENAI_ROUTE_PREFIX
+          value: openai
+      resources:
+        requests:
+          cpu: "4"
+          memory: 20Gi
+          ephemeral-storage: 10Gi
+          nvidia.com/gpu: "1"
+        limits:
+          cpu: "8"
+          memory: 30Gi
+          ephemeral-storage: 30Gi
+          nvidia.com/gpu: "1"

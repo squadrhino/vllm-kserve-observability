@@ -1,0 +1,59 @@
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: gemma4-vllm
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: gemma4-vllm
+    app.kubernetes.io/component: serving-runtime
+    app.kubernetes.io/part-of: langgraph-production-agent
+spec:
+  annotations:
+    prometheus.kserve.io/path: /metrics
+    prometheus.kserve.io/port: "8080"
+  containers:
+    - name: kserve-container
+      image: gemma4-vllm:0.20.1-cu129
+      imagePullPolicy: IfNotPresent
+      command:
+        - vllm
+        - serve
+      args:
+        - /mnt/models
+        - --host=0.0.0.0
+        - --port=8080
+      ports:
+        - name: http1
+          containerPort: 8080
+          protocol: TCP
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 20
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 60
+      startupProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 120
+      volumeMounts:
+        - name: devshm
+          mountPath: /dev/shm
+  protocolVersions:
+    - v1
+  supportedModelFormats:
+    - name: huggingface
+      version: "1"
+      autoSelect: false
+      priority: 10
+  volumes:
+    - name: devshm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Gi

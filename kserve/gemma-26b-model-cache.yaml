@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gemma-26b-model-cache
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: gemma-26b
+    app.kubernetes.io/component: model-cache
+    app.kubernetes.io/part-of: langgraph-production-agent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 35Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gemma-26b-model-cache-sync
+  namespace: inference
+  labels:
+    app.kubernetes.io/name: gemma-26b
+    app.kubernetes.io/component: model-cache-sync
+    app.kubernetes.io/part-of: langgraph-production-agent
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gemma-26b
+        app.kubernetes.io/component: model-cache-sync
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: sync
+          image: minio/mc:RELEASE.2025-04-08T15-39-49Z
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-model-storage
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: minio-model-storage
+                  key: AWS_SECRET_ACCESS_KEY
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mc alias set local http://minio.data.svc.cluster.local "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY"
+              mkdir -p /models/gemma-4-26b-a4b-nvfp4
+              mc mirror --overwrite local/models/gemma/gemma-4-26b-a4b-nvfp4 /models/gemma-4-26b-a4b-nvfp4
+              du -sh /models/gemma-4-26b-a4b-nvfp4
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: gemma-26b-model-cache

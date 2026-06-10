@@ -1,0 +1,561 @@
+{
+  "uid": "inference-sli",
+  "title": "Inference / Production SLIs — Service, Capacity & GPU",
+  "description": "Single-pane production monitoring for the Gemma4 vLLM inference service: golden-signal SLIs, latency breakdown, capacity/saturation signals, GPU performance and health, and pod/node infrastructure.",
+  "tags": ["inference", "sli", "vllm", "gpu", "gemma", "capacity"],
+  "timezone": "browser",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "10s",
+  "time": {"from": "now-3h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "model",
+        "type": "query",
+        "label": "Model",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(vllm:num_requests_running, model_name)",
+        "current": {"text": "gemma", "value": "gemma"},
+        "refresh": 1,
+        "includeAll": false
+      },
+      {
+        "name": "namespace",
+        "type": "query",
+        "label": "Namespace",
+        "datasource": {"type": "prometheus", "uid": "prometheus"},
+        "query": "label_values(vllm:num_requests_running, namespace)",
+        "current": {"text": "inference", "value": "inference"},
+        "refresh": 1
+      },
+      {
+        "name": "max_seqs",
+        "type": "custom",
+        "label": "Engine max_num_seqs",
+        "query": "2,4,8,16,32,64,128,256",
+        "current": {"text": "2", "value": "2"},
+        "includeAll": false
+      }
+    ]
+  },
+  "panels": [
+
+    {"id": 100, "type": "row", "title": "Golden Signals — At a Glance", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 1, "type": "stat", "title": "Service Up",
+      "description": "Prometheus scrape health of the vLLM /metrics endpoint. 0 = the predictor is unreachable — everything else on this dashboard is stale.",
+      "gridPos": {"x": 0, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "max(up{namespace=\"$namespace\", service=~\".*predictor\"}) or vector(0)"}],
+      "options": {"graphMode": "none", "colorMode": "background", "textMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 2, "type": "stat", "title": "Ready Replicas",
+      "description": "Predictor pods in Ready state. Compare against expected minReplicas.",
+      "gridPos": {"x": 3, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(kube_pod_status_ready{namespace=\"$namespace\", pod=~\".*gemma.*predictor.*\", condition=\"true\"}) or vector(0)"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 3, "type": "stat", "title": "Requests / sec",
+      "description": "Completed requests per second across all finish reasons.",
+      "gridPos": {"x": 6, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(vllm:request_success_total{model_name=\"$model\"}[5m]))"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "reqps", "decimals": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 4, "type": "stat", "title": "Abort Rate",
+      "description": "Share of requests finishing with reason=abort (client disconnects, cancellations, engine aborts). The closest thing vLLM exposes to an error-rate SLI.",
+      "gridPos": {"x": 9, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * sum(rate(vllm:request_success_total{model_name=\"$model\", finished_reason=\"abort\"}[5m])) / clamp_min(sum(rate(vllm:request_success_total{model_name=\"$model\"}[5m])), 1e-9)"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 5, "type": "stat", "title": "TTFT p95",
+      "description": "Time to first token, p95 over 5m. The primary responsiveness SLI for streaming inference.",
+      "gridPos": {"x": 12, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=\"$model\"}[5m])))"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 2.5}, {"color": "red", "value": 10}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 6, "type": "stat", "title": "ITL p95",
+      "description": "Inter-token latency (time per output token), p95 over 5m. Drives perceived streaming smoothness.",
+      "gridPos": {"x": 15, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=\"$model\"}[5m])))"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 3, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.2}, {"color": "red", "value": 0.5}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 7, "type": "stat", "title": "E2E p95",
+      "description": "End-to-end request latency, p95 over 5m (queue + prefill + decode).",
+      "gridPos": {"x": 18, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=\"$model\"}[5m])))"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 30}, {"color": "red", "value": 60}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 8, "type": "stat", "title": "Gen tok/s",
+      "description": "Output token throughput — the useful work this service delivers.",
+      "gridPos": {"x": 21, "y": 1, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(vllm:generation_tokens_total{model_name=\"$model\"}[1m]))"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "ops", "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "green", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+
+    {"id": 200, "type": "row", "title": "Latency SLIs", "gridPos": {"x": 0, "y": 6, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 10, "type": "timeseries", "title": "Time to First Token (p50 / p90 / p95 / p99)",
+      "gridPos": {"x": 0, "y": 7, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "B", "legendFormat": "p90", "expr": "histogram_quantile(0.90, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "C", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "D", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:time_to_first_token_seconds_bucket{model_name=\"$model\"}[5m])))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "Inter-Token Latency / TPOT (p50 / p95 / p99)",
+      "description": "Per-token decode latency. The req-avg series is mean time-per-output-token per request (request_time_per_output_token).",
+      "gridPos": {"x": 8, "y": 7, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "ITL p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "B", "legendFormat": "ITL p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "C", "legendFormat": "ITL p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:inter_token_latency_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "D", "legendFormat": "req-avg TPOT p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_time_per_output_token_seconds_bucket{model_name=\"$model\"}[5m])))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "End-to-End Latency (p50 / p95 / p99)",
+      "gridPos": {"x": 16, "y": 7, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "p50", "expr": "histogram_quantile(0.50, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "B", "legendFormat": "p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "C", "legendFormat": "p99", "expr": "histogram_quantile(0.99, sum by (le) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=\"$model\"}[5m])))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "Latency Phase Breakdown — p95 (queue / prefill / decode / inference)",
+      "description": "Where request time is spent. Rising queue = admission pressure (capacity). Rising prefill = long prompts or prefill contention. Rising decode = batch contention or GPU saturation.",
+      "gridPos": {"x": 0, "y": 15, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "queue", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "B", "legendFormat": "prefill", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_prefill_time_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "C", "legendFormat": "decode", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_decode_time_seconds_bucket{model_name=\"$model\"}[5m])))"},
+        {"refId": "D", "legendFormat": "inference", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_inference_time_seconds_bucket{model_name=\"$model\"}[5m])))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"fillOpacity": 15, "stacking": {"mode": "none"}}}}
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "TTFT SLO Attainment (% of requests ≤ 2.5s)",
+      "description": "Goodput-style SLI: share of requests whose first token arrived within 2.5s. Relies on the native 2.5s histogram bucket in vLLM's TTFT metric.",
+      "gridPos": {"x": 12, "y": 15, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "TTFT ≤ 2.5s", "expr": "100 * sum(rate(vllm:time_to_first_token_seconds_bucket{model_name=\"$model\", le=\"2.5\"}[5m])) / clamp_min(sum(rate(vllm:time_to_first_token_seconds_count{model_name=\"$model\"}[5m])), 1e-9)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"fillOpacity": 10}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 95}, {"color": "green", "value": 99}]}, "color": {"mode": "thresholds"}}}
+    },
+
+    {"id": 300, "type": "row", "title": "Traffic & Throughput", "gridPos": {"x": 0, "y": 23, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 20, "type": "timeseries", "title": "Requests / sec by finish reason",
+      "description": "stop = natural completion, length = hit max tokens (check max_model_len/truncation), abort = cancelled or failed.",
+      "gridPos": {"x": 0, "y": 24, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "{{finished_reason}}", "expr": "sum by (finished_reason) (rate(vllm:request_success_total{model_name=\"$model\"}[5m]))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps", "custom": {"fillOpacity": 25, "stacking": {"mode": "normal"}}}}
+    },
+    {
+      "id": 21, "type": "timeseries", "title": "Token Throughput (prompt vs generation)",
+      "gridPos": {"x": 8, "y": 24, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "prompt", "expr": "sum(rate(vllm:prompt_tokens_total{model_name=\"$model\"}[1m]))"},
+        {"refId": "B", "legendFormat": "generation", "expr": "sum(rate(vllm:generation_tokens_total{model_name=\"$model\"}[1m]))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"fillOpacity": 15}}}
+    },
+    {
+      "id": 22, "type": "timeseries", "title": "Mean Tokens per Request",
+      "description": "Average prompt and generation lengths. Shifts here change capacity math — longer prompts eat KV cache and prefill time.",
+      "gridPos": {"x": 16, "y": 24, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "prompt tok/req", "expr": "sum(rate(vllm:request_prompt_tokens_sum{model_name=\"$model\"}[5m])) / clamp_min(sum(rate(vllm:request_prompt_tokens_count{model_name=\"$model\"}[5m])), 1e-9)"},
+        {"refId": "B", "legendFormat": "gen tok/req", "expr": "sum(rate(vllm:request_generation_tokens_sum{model_name=\"$model\"}[5m])) / clamp_min(sum(rate(vllm:request_generation_tokens_count{model_name=\"$model\"}[5m])), 1e-9)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 23, "type": "heatmap", "title": "Prompt Token Distribution",
+      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "format": "heatmap", "legendFormat": "{{le}}", "expr": "sum by (le) (rate(vllm:request_prompt_tokens_bucket{model_name=\"$model\"}[5m]))"}
+      ]
+    },
+    {
+      "id": 24, "type": "heatmap", "title": "Generation Token Distribution",
+      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "format": "heatmap", "legendFormat": "{{le}}", "expr": "sum by (le) (rate(vllm:request_generation_tokens_bucket{model_name=\"$model\"}[5m]))"}
+      ]
+    },
+
+    {"id": 400, "type": "row", "title": "Capacity SLIs — Engine & Cluster", "gridPos": {"x": 0, "y": 40, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 30, "type": "stat", "title": "KV Cache Now",
+      "description": "Current KV cache pool utilization. >75% sustained = scale-up pressure. >90% = preemption risk.",
+      "gridPos": {"x": 0, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "max(vllm:kv_cache_usage_perc{model_name=\"$model\"}) * 100"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 75}, {"color": "red", "value": 90}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 31, "type": "stat", "title": "KV Cache p95 (5m)",
+      "description": "Smoothed KV pressure — use this, not the instantaneous value, for scaling decisions.",
+      "gridPos": {"x": 3, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "quantile_over_time(0.95, max(vllm:kv_cache_usage_perc{model_name=\"$model\"})[5m:30s]) * 100"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 75}, {"color": "red", "value": 90}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 32, "type": "stat", "title": "Waiting Queue",
+      "description": "Requests waiting for engine admission. Any sustained non-zero value is a scale-out trigger.",
+      "gridPos": {"x": 6, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(vllm:num_requests_waiting{model_name=\"$model\"})"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 3}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 33, "type": "stat", "title": "Slot Saturation",
+      "description": "Running requests vs the engine's max_num_seqs (set via the dashboard variable, currently matching --max-num-seqs in the InferenceService).",
+      "gridPos": {"x": 9, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * sum(vllm:num_requests_running{model_name=\"$model\"}) / $max_seqs"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 75}, {"color": "red", "value": 100}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 34, "type": "stat", "title": "Preemptions / s",
+      "description": "Sequences evicted mid-generation due to KV memory pressure. Should be 0 in steady state.",
+      "gridPos": {"x": 12, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(vllm:num_preemptions_total{model_name=\"$model\"}[5m]))"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "ops", "decimals": 2, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 35, "type": "stat", "title": "Prefix Cache Hit",
+      "description": "Prefix cache hit rate. Higher = less prefill compute. Drops when traffic mix changes.",
+      "gridPos": {"x": 15, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * sum(rate(vllm:prefix_cache_hits_total{model_name=\"$model\"}[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total{model_name=\"$model\"}[5m])), 1e-9)"}],
+      "options": {"graphMode": "area", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 36, "type": "stat", "title": "GPU Headroom",
+      "description": "Cluster-level: % of allocatable nvidia.com/gpu not yet requested by pods. 0% = no room to scale out without new nodes.",
+      "gridPos": {"x": 18, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * (1 - sum(kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}) / clamp_min(sum(kube_node_status_allocatable{resource=\"nvidia_com_gpu\"}), 1))"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 10}, {"color": "green", "value": 30}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 37, "type": "stat", "title": "Pending GPU Pods",
+      "description": "Pods requesting GPUs stuck in Pending — unschedulable scale-ups.",
+      "gridPos": {"x": 21, "y": 41, "w": 3, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "count(kube_pod_status_phase{phase=\"Pending\"} == 1 and on(namespace, pod) (sum by (namespace, pod) (kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"}) > 0)) or vector(0)"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 38, "type": "timeseries", "title": "Running vs Waiting Requests",
+      "description": "Running flat at max_num_seqs with waiting > 0 means the engine is admission-limited — add replicas or raise max_num_seqs if KV allows.",
+      "gridPos": {"x": 0, "y": 46, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "running", "expr": "sum(vllm:num_requests_running{model_name=\"$model\"})"},
+        {"refId": "B", "legendFormat": "waiting", "expr": "sum(vllm:num_requests_waiting{model_name=\"$model\"})"},
+        {"refId": "C", "legendFormat": "max_num_seqs", "expr": "$max_seqs + 0 * sum(vllm:num_requests_running{model_name=\"$model\"})"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "custom": {"fillOpacity": 15}}, "overrides": [{"matcher": {"id": "byName", "options": "max_num_seqs"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}, {"id": "custom.fillOpacity", "value": 0}, {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]}
+    },
+    {
+      "id": 39, "type": "timeseries", "title": "KV Cache Utilization per Pod",
+      "gridPos": {"x": 12, "y": 46, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "{{pod}}", "expr": "vllm:kv_cache_usage_perc{model_name=\"$model\"} * 100"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"fillOpacity": 15, "thresholdsStyle": {"mode": "line"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 75}, {"color": "red", "value": 90}]}}}
+    },
+    {
+      "id": 40, "type": "timeseries", "title": "Queue Wait Time p95",
+      "description": "Time requests spend queued before admission. The leading indicator of under-capacity, before TTFT degrades.",
+      "gridPos": {"x": 0, "y": 54, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "queue p95", "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm:request_queue_time_seconds_bucket{model_name=\"$model\"}[5m])))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s", "custom": {"fillOpacity": 15}}}
+    },
+    {
+      "id": 41, "type": "timeseries", "title": "Preemptions / sec",
+      "gridPos": {"x": 8, "y": 54, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "{{pod}}", "expr": "rate(vllm:num_preemptions_total{model_name=\"$model\"}[5m])"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ops", "custom": {"fillOpacity": 15}}}
+    },
+    {
+      "id": 42, "type": "timeseries", "title": "Prefix Cache Hit Rate",
+      "gridPos": {"x": 16, "y": 54, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "hit rate", "expr": "100 * sum(rate(vllm:prefix_cache_hits_total{model_name=\"$model\"}[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total{model_name=\"$model\"}[5m])), 1e-9)"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"fillOpacity": 15}}}
+    },
+
+    {"id": 500, "type": "row", "title": "GPU — Utilization & Performance (DCGM)", "gridPos": {"x": 0, "y": 62, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 50, "type": "timeseries", "title": "GPU Utilization & Engine Activity",
+      "description": "GPU_UTIL can read 100% while SMs idle. SM active = real compute occupancy; tensor active = matmul pipe usage (the work LLMs care about); DRAM active = memory-bandwidth bound (typical during decode).",
+      "gridPos": {"x": 0, "y": 63, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "GPU util % gpu={{gpu}}", "expr": "DCGM_FI_DEV_GPU_UTIL"},
+        {"refId": "B", "legendFormat": "SM active % gpu={{gpu}}", "expr": "100 * DCGM_FI_PROF_SM_ACTIVE"},
+        {"refId": "C", "legendFormat": "Tensor active % gpu={{gpu}}", "expr": "100 * DCGM_FI_PROF_PIPE_TENSOR_ACTIVE"},
+        {"refId": "D", "legendFormat": "DRAM active % gpu={{gpu}}", "expr": "100 * DCGM_FI_PROF_DRAM_ACTIVE"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 51, "type": "timeseries", "title": "GPU Memory (framebuffer)",
+      "description": "vLLM pre-allocates --gpu-memory-utilization (0.88) at startup, so 'used' staying flat and high is normal. Watch 'free' shrinking further — that is non-vLLM memory growth.",
+      "gridPos": {"x": 12, "y": 63, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "used gpu={{gpu}}", "expr": "DCGM_FI_DEV_FB_USED"},
+        {"refId": "B", "legendFormat": "free gpu={{gpu}}", "expr": "DCGM_FI_DEV_FB_FREE"},
+        {"refId": "C", "legendFormat": "reserved gpu={{gpu}}", "expr": "DCGM_FI_DEV_FB_RESERVED"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "mbytes", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 52, "type": "timeseries", "title": "Temperature (GPU & VRAM)",
+      "gridPos": {"x": 0, "y": 71, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "GPU gpu={{gpu}}", "expr": "DCGM_FI_DEV_GPU_TEMP"},
+        {"refId": "B", "legendFormat": "VRAM gpu={{gpu}}", "expr": "DCGM_FI_DEV_MEMORY_TEMP"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "celsius", "custom": {"fillOpacity": 10, "thresholdsStyle": {"mode": "line"}}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 80}, {"color": "red", "value": 90}]}}}
+    },
+    {
+      "id": 53, "type": "timeseries", "title": "Power Draw",
+      "gridPos": {"x": 8, "y": 71, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "gpu={{gpu}}", "expr": "DCGM_FI_DEV_POWER_USAGE"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "watt", "custom": {"fillOpacity": 15}}}
+    },
+    {
+      "id": 54, "type": "timeseries", "title": "Clocks (SM & Memory)",
+      "description": "A drop in SM clock under sustained load with high temperature indicates thermal or power throttling.",
+      "gridPos": {"x": 16, "y": 71, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "SM MHz gpu={{gpu}}", "expr": "DCGM_FI_DEV_SM_CLOCK"},
+        {"refId": "B", "legendFormat": "Mem MHz gpu={{gpu}}", "expr": "DCGM_FI_DEV_MEM_CLOCK"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "rotmhz", "custom": {"fillOpacity": 5}}}
+    },
+
+    {"id": 600, "type": "row", "title": "GPU — Health & Errors (DCGM)", "gridPos": {"x": 0, "y": 79, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 60, "type": "stat", "title": "XID Errors",
+      "description": "Last NVIDIA XID error code reported. Anything non-zero needs node-level investigation.",
+      "gridPos": {"x": 0, "y": 80, "w": 4, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(DCGM_FI_DEV_XID_ERRORS)"}],
+      "options": {"graphMode": "none", "colorMode": "background"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 61, "type": "stat", "title": "ECC SBE (volatile)",
+      "gridPos": {"x": 4, "y": 80, "w": 4, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(DCGM_FI_DEV_ECC_SBE_VOL_TOTAL)"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 62, "type": "stat", "title": "ECC DBE (volatile)",
+      "description": "Double-bit ECC errors are uncorrectable — non-zero means the GPU is producing bad data or crashing workloads.",
+      "gridPos": {"x": 8, "y": 80, "w": 4, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(DCGM_FI_DEV_ECC_DBE_VOL_TOTAL)"}],
+      "options": {"graphMode": "none", "colorMode": "background"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 63, "type": "stat", "title": "Pages Pending Retirement",
+      "gridPos": {"x": 12, "y": 80, "w": 4, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(DCGM_FI_DEV_RETIRED_PENDING)"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 64, "type": "stat", "title": "PCIe Replays",
+      "description": "PCIe retries since boot. A climbing count points to bus/riser/signal problems.",
+      "gridPos": {"x": 16, "y": 80, "w": 4, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(DCGM_FI_DEV_PCIE_REPLAY_COUNTER)"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 65, "type": "stat", "title": "Energy Last 1h",
+      "gridPos": {"x": 20, "y": 80, "w": 4, "h": 5},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(increase(DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION[1h])) / 1000 / 3600"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "watth", "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 66, "type": "timeseries", "title": "PCIe Throughput (RX / TX)",
+      "gridPos": {"x": 0, "y": 85, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "RX gpu={{gpu}}", "expr": "rate(DCGM_FI_PROF_PCIE_RX_BYTES[2m])"},
+        {"refId": "B", "legendFormat": "TX gpu={{gpu}}", "expr": "rate(DCGM_FI_PROF_PCIE_TX_BYTES[2m])"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 67, "type": "timeseries", "title": "GPUs: Allocatable vs Requested",
+      "description": "Cluster GPU capacity over time. The gap between the lines is the scale-out budget.",
+      "gridPos": {"x": 12, "y": 85, "w": 12, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "allocatable", "expr": "sum(kube_node_status_allocatable{resource=\"nvidia_com_gpu\"})"},
+        {"refId": "B", "legendFormat": "requested", "expr": "sum(kube_pod_container_resource_requests{resource=\"nvidia_com_gpu\"})"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "custom": {"fillOpacity": 10}}}
+    },
+
+    {"id": 700, "type": "row", "title": "Infra SLIs — Pod, Node & Storage", "gridPos": {"x": 0, "y": 93, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "id": 70, "type": "timeseries", "title": "Container CPU (usage vs request vs limit)",
+      "gridPos": {"x": 0, "y": 94, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "usage {{pod}}", "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"$namespace\", container=\"kserve-container\", pod=~\".*gemma.*\"}[5m]))"},
+        {"refId": "B", "legendFormat": "request", "expr": "max(kube_pod_container_resource_requests{namespace=\"$namespace\", container=\"kserve-container\", pod=~\".*gemma.*\", resource=\"cpu\"})"},
+        {"refId": "C", "legendFormat": "limit", "expr": "max(kube_pod_container_resource_limits{namespace=\"$namespace\", container=\"kserve-container\", pod=~\".*gemma.*\", resource=\"cpu\"})"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "custom": {"fillOpacity": 10}}, "overrides": [{"matcher": {"id": "byRegexp", "options": "request|limit"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}, {"id": "custom.fillOpacity", "value": 0}]}]}
+    },
+    {
+      "id": 71, "type": "timeseries", "title": "Container Memory (working set vs limit)",
+      "description": "Working set approaching the limit means OOMKill risk — vLLM host memory grows with prefix cache and tokenizer load.",
+      "gridPos": {"x": 8, "y": 94, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "working set {{pod}}", "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"$namespace\", container=\"kserve-container\", pod=~\".*gemma.*\"})"},
+        {"refId": "B", "legendFormat": "limit", "expr": "max(kube_pod_container_resource_limits{namespace=\"$namespace\", container=\"kserve-container\", pod=~\".*gemma.*\", resource=\"memory\"})"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"fillOpacity": 10}}, "overrides": [{"matcher": {"id": "byName", "options": "limit"}, "properties": [{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}, {"id": "custom.fillOpacity", "value": 0}, {"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]}]}
+    },
+    {
+      "id": 72, "type": "timeseries", "title": "Pod Network (RX / TX)",
+      "gridPos": {"x": 16, "y": 94, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "RX {{pod}}", "expr": "sum by (pod) (rate(container_network_receive_bytes_total{namespace=\"$namespace\", pod=~\".*gemma.*\"}[5m]))"},
+        {"refId": "B", "legendFormat": "TX {{pod}}", "expr": "sum by (pod) (rate(container_network_transmit_bytes_total{namespace=\"$namespace\", pod=~\".*gemma.*\"}[5m]))"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "Bps", "custom": {"fillOpacity": 10}}}
+    },
+    {
+      "id": 73, "type": "timeseries", "title": "Pod Restarts (1h window)",
+      "gridPos": {"x": 0, "y": 102, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "{{pod}}", "expr": "increase(kube_pod_container_status_restarts_total{namespace=\"$namespace\", container=\"kserve-container\", pod=~\".*gemma.*\"}[1h])"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "custom": {"fillOpacity": 25}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 74, "type": "timeseries", "title": "Metrics Target Health (up)",
+      "description": "Scrape success for the predictor metrics endpoint. Gaps here explain gaps everywhere else.",
+      "gridPos": {"x": 8, "y": 102, "w": 8, "h": 8},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {"refId": "A", "legendFormat": "{{service}}", "expr": "max by (service) (up{namespace=\"$namespace\", service=~\".*predictor\"})"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0, "max": 1, "decimals": 0, "custom": {"fillOpacity": 30, "lineInterpolation": "stepAfter"}, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 75, "type": "stat", "title": "Pod Uptime",
+      "gridPos": {"x": 16, "y": 102, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "time() - max(kube_pod_start_time{namespace=\"$namespace\", pod=~\".*gemma.*predictor.*\"})"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "s", "decimals": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 600}, {"color": "green", "value": 3600}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 76, "type": "stat", "title": "Cache Block Size",
+      "description": "vLLM KV cache block size from cache_config_info — context for KV capacity math.",
+      "gridPos": {"x": 20, "y": 102, "w": 4, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "max(vllm:cache_config_info{model_name=\"$model\"})"}],
+      "options": {"graphMode": "none", "colorMode": "value"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}, "color": {"mode": "thresholds"}}}
+    },
+    {
+      "id": 77, "type": "gauge", "title": "Model Cache PVC Usage",
+      "description": "Usage of the model-cache PVC. A full volume blocks pod restarts (model re-download/load fails).",
+      "gridPos": {"x": 16, "y": 106, "w": 8, "h": 4},
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [{"refId": "A", "expr": "100 * max(kubelet_volume_stats_used_bytes{namespace=\"$namespace\", persistentvolumeclaim=~\".*model-cache.*\"} / kubelet_volume_stats_capacity_bytes{namespace=\"$namespace\", persistentvolumeclaim=~\".*model-cache.*\"})"}],
+      "options": {"showThresholdLabels": false, "showThresholdMarkers": true},
+      "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100, "decimals": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 80}, {"color": "red", "value": 92}]}, "color": {"mode": "thresholds"}}}
+    }
+  ]
+}
