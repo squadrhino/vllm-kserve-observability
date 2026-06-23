@@ -1,5 +1,8 @@
 # vLLM + KServe Observability
 
+## Architecture
+<img width="1750" height="1163" alt="arc_diagram" src="https://github.com/user-attachments/assets/269867e2-6479-4852-a641-728b4c9681bc" />
+
 Manifests, Grafana dashboards, and the load generator behind
 [How I Instrumented vLLM on Kubernetes: The Dashboards, Queries, and SLOs](https://vinayakgajare.hashnode.dev/vllm-kubernetes-observability-dashboards-queries-slos)
 
